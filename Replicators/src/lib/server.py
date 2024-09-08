@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(script_dir, '..')))
 # from lib.zka_networking import ThreadedTCPRequestHandler
 # from lib.new_qrcode import RegistrationExchange
 # from lib.zka_crypto import generate_rsa_key_pair
-from lib.codebase import PoolServer, encoder64, decoder64
+from lib.codebase import GeneticPool, find_dominate_gene, determine_gene_fitness
 # from lib.new_server_api import GenesisVerify, ChallengeVerify, MasterSecretVerify
 # from lib.new_database import AsyncDatabase
 from lib.configurator import configurations as cfg
@@ -55,254 +55,173 @@ logging.config.dictConfig(cfg.logging_config)
 LOG = logging.getLogger('SERVER')
 LOG.debug("Server logging is configured.")
 
+LOG.setLevel(logging.INFO)
+# Shared state
+tx_queue = asyncio.Queue()
+rx_queue = asyncio.Queue()
+server_ready_event = asyncio.Event()
+SENTINEL = object()  # Special object to signal exhaustion
+lock = asyncio.Lock()
+generator = None
+ready = True
+genes = {}
 
-class ServerABC:
-    def __init__(self, host: str = 'localhost', port: int = 9999) -> None:
-        self.host = host
-        self.port = port
-        self.cnt = 10
-        self.rng = np.random.default_rng()
+# Params
+epochs_remaining = 200  # Example value for the number of epochs to run
+pool_size = 512
+tape_length = 64
+path = f'{cfg.data_path}/server/run_001/'
 
-    def run_server(self):
-        app = web.Application()
-        app.router.add_post('/', self.handler)
-        app.router.add_post('/stream', self.stream_handler)
+# Resources
+rng = np.random.default_rng()
+gp = GeneticPool(pool_size, tape_length, filename=path)
+gp.create()
+# gp.save(overwrite=True) 
+gp.load(filename=f'{path}genetic_pool_2')
+gp.pool = bytearray(gp.pool)
 
-        web.run_app(app, host=self.host, port=self.port)
 
-    async def handler(self, request):
-        # Get the raw byte data from the request
-        byte_data = await request.read()  
-
-        try:
-            print('Route init: ', byte_data)
-
-            arr = np.arange(10, dtype=np.uint8)
-            
-            return web.Response(body=arr.tobytes(), status=202)
-        
-        except Exception as e:
-            LOG.error(f"Error in handler: {e}", exc_info=True)
-            return web.Response(status=500, text='Server error')
-
-    async def stream_handler(self, request):
-        # Get the raw byte data from the request
-        byte_data = await request.read()  
-
-        try:
-            print('Route Stream: ', byte_data)
-
-            arr = np.frombuffer(byte_data, dtype=np.uint8).copy()
-            arr -= 1
-            
-            # Introduce random errors
-            if self.rng.random() < 0.2:
-                raise ValueError('Random error')
-
-            if self.cnt > 0:
-                self.cnt -= 1
-                return web.Response(body=arr.tobytes(), status=202)
-            else:
-                self.cnt = 10
-                return web.Response(status=200, text='Done')     
-        
-        except ValueError as e:
-            LOG.error(f"Error in stream_handler: {e}", exc_info=True)
-            # Text cannot be 'e' because it will make the response a 500 error
-            return web.Response(status=403, text='Random error')
-        
-
-class ServerMain:
-    def __init__(self,
-                 host: str = 'localhost',
-                 port: int = 9999,
-                 epochs: int = 10, 
-                 pool_size: int = 100, 
-                 tape_length: int = 64, 
-                 experiment_name: str = 'run_001',
-                 first_run: bool = True,
-                 track_generations: bool = False,
-                 ) -> None:      
-        self.host = host
-        self.port = port
-        self.epochs = epochs
-        self.pool_size = pool_size
-        self.tape_length = tape_length
-        self.experiment_name = experiment_name
-        self.first_run = first_run
-        self.track_generations = track_generations
-        self.data_path = cfg.data_path
-        self.experiment_path = f'{self.data_path}/server/{experiment_name}/'
-        if not os.path.exists(self.experiment_path):
-            os.makedirs(self.experiment_path)
-
-    def initialize_server(self):
-        self.ps = PoolServer(self.epochs, self.pool_size, self.tape_length, self.experiment_path)
-
-        if self.first_run:
-            self.ps.pool.create()
-            self.ps.pool.save(overwrite=True)
-        else:
-            self.ps.pool.load(most_recent=True)
+async def byte_array_generator():
+    # Async generator that yields 128-byte arrays
+    tapes = rng.permutation(pool_size).astype(np.uint16)
     
-    def run_server(self):
-        self.initialize_server()
+    for i, j in zip(tapes[0::2], tapes[1::2]):
+        header = np.array([i, j], dtype=np.uint16).tobytes()
+        # Pool should be a long byte string
+        tape_i = gp[i]
+        tape_j = gp[j]
+        yield header + tape_i + tape_j
 
-        app = web.Application()
-        app.router.add_post('/', self.handler)
-        app.router.add_post('/stream', self.stream_handler)
+async def find_dominate_gene_from_pool() -> tuple[str, float]:
+    global genes, epochs_remaining
 
-        web.run_app(app, host=self.host, port=self.port)
+    pool = np.frombuffer(gp.pool, dtype=np.uint8)
 
-    async def handler(self, request):
-        # Get the raw byte data from the request
-        try:
-            header = await request.read()  
-            
-            if header == b'NEW WORKER':
-                msg = await self.ps.serve()
-            else:
-                # print(f'Invalid header: {header}')
-                raise ValueError(f'Invalid header: {header}')
+    gene = find_dominate_gene(pool, pool_size, tape_length)
+    gene_str, fitness = determine_gene_fitness(gene)
 
-            if msg == 'STOP':
-                raise StopIteration()
-            
-        except StopIteration:
-            LOG.info('All tapes have been served')
-            return web.Response(status=204, text='Server has stopped')
-        except ValueError as e:
-            LOG.error(f"Error in handler: {e}", exc_info=True)
-            return web.Response(status=400, text=f'Invalid header: {header}')
-        except Exception as e:
-            LOG.error(f"Error in handler: {e}", exc_info=True)
-            return web.Response(status=500, text='Server error')
-        else:
-            return web.Response(status=202, body=msg)
-
-    async def stream_handler(self, request):
-        # Get the raw byte data from the request
-        try:
-            modified_tape = await request.read()  
-            
-            await self.ps.receive(modified_tape)
-
-            msg = await self.ps.serve()
-
-            if msg == 'STOP':
-                raise StopIteration()
-            
-        except StopIteration:
-            LOG.info(f'All tapes have been served. Epochs: {self.ps.epochs}')
-            
-            if self.track_generations:
-                self.ps.pool.save(overwrite=False)
-            else:
-                self.ps.pool.save(overwrite=True)
-
-            LOG.info(f'Pool saved. Compression ratio: {self.ps.pool.compression_ratio}')
-            
-            return web.Response(status=204, text='Server has stopped')
-        except TimeoutError as e:
-            LOG.warning(f"Error in stream_handler: {e}")
-            return web.Response(status=408, text='Timeout warning')
-        except Exception as e:
-            LOG.error(f"Error in stream_handler: {e}", exc_info=True)
-            return web.Response(status=500, text='Server error')
-        else:
-            return web.Response(status=202, body=msg)
-        
-    # This is on the server
-    async def route_request_v1(self, request):
-        data = await request.text()
-        header = decoder64(data)[0]
-        
-        if header == 10:
-            print('Transmitting tapes', header)
-            return await self.transmit_tapes()
-        elif header == 20:
-            return await self.receive_tapes(request)
-        elif header == 30:
-            print('receive_transmit tapes', header)
-            return await self.receive_transmit(request)
-        else:
-            return web.Response(status=400, text=f"Invalid header: {header}")
-            
-    async def transmit_tapes_v1(self):
-        '''Return the next tape in the pool'''
-        try:
-            msg = await self.ps.serve()
-        except Exception as e:
-            LOG.error(f"Error in transmit_tapes: {e}")
-            return web.Response(status=500, text=e)
-        else:
-            return web.Response(text=msg)
+    if gene_str not in genes:
+        genes[gene_str] = fitness
     
-    async def receive_tapes_v1(self, request):
-        '''Recieve a tape from the client'''
+    print(f'Dominant Gene: {gene_str}, fitness: {fitness}, epochs remaining: {epochs_remaining}')
+    
+    # LOG.info(f'Dominant Gene: {gene_str}, fitness: {fitness}, epochs remaining: {epochs_remaining}')
+
+async def producer_task():
+    """Background task to populate the queue with byte arrays."""
+    global generator, epochs_remaining
+
+    if epochs_remaining > 0:
+        # Indicate that the server is not ready while repopulating
+        server_ready_event.clear()
+
+        # Initialize the generator if it's not set
+        if generator is None:
+            generator = byte_array_generator()
+            epochs_remaining -= 1
+
+        # Repopulate the queue
         try:
-            tape = await request.text()
+            async for byte_array in generator:
+                await tx_queue.put(byte_array)
+            if epochs_remaining > 0:
+                # Signals the end of the epoch
+                await tx_queue.put(SENTINEL)  
+            else:
+                # Signals the end of all epochs
+                await tx_queue.put('STOP')
+        except StopAsyncIteration:
+            pass
+        finally:
+            generator = None  # Reset generator when exhausted
 
-            await self.ps.receive(tape[1:])
-            msg = 'ACK'
-        except Exception as e:
-            LOG.error(f"Error in receive_tapes: {e}")
-            return web.Response(status=500, text=e)
-        else:
-            return web.Response(text=msg)
-
-    async def receive_transmit_v1(self, request):
-        '''Recieve a tape from the client and return the next tape in the pool'''
-        try:
-            tape = await request.text()
-
-            await self.ps.receive(tape)
-
-            msg = await self.ps.serve()
-        except Exception as e:
-            LOG.error(f"Error in receive_transmit: {e}", exc_info=True)
-            return web.Response(status=500, text=e)
-        else:
-            return web.Response(text=msg)
+        # Signal that the server is ready
+        server_ready_event.set()
         
-      
+        # Wait for a condition before starting the next epoch
+        await asyncio.sleep(0)
 
-if __name__ == "__main__":
-    # python3 -m server --run_server -hs 'localhost' -p 9999 -e 10 -ps 100 -t 64 -en 'run_001' --first_run --track_gen
+        LOG.info(f'Epochs remaining: {epochs_remaining}')
 
-    parser = argparse.ArgumentParser(description='Server the GeneticCode.')
-    parser.add_argument('--run_server', action='store_true', help='Initialize the server and run forever.')
-    parser.add_argument('-hs', '--host', default='localhost', help='ip address or "localhost" of server.')  
-    parser.add_argument('-p', '--port', default=9999, help='Port of server.') 
-    parser.add_argument('-e', '--epoch', default=10, help='Number of times to run all tapes.')
-    parser.add_argument('-ps', '--pool_size', default=100, help='Number of tapes in the pool.')
-    parser.add_argument('-t', '--tape_length', default=64, help='Number of bytes in the tape.')
-    parser.add_argument('-en', '--experiment_name', default='run_001', help='Name of the genetic pool.')
-    parser.add_argument('--first_run', action='store_true', help='Initialize the server and run forever.')
-    parser.add_argument('--track_gen', action='store_true', help='Initialize the server and run forever.')
+async def handle_client(request):
+    global ready
+    
+    """Handler for client requests to get byte arrays."""
+    try:
+        # Wait until the server is ready, but with a timeout
+        await asyncio.wait_for(server_ready_event.wait(), timeout=5)
 
-    args = parser.parse_args()
-
-    if args.first_run:
-        first_run = True
+        # Get data from the queue
+        byte_array = await tx_queue.get()
+        
+        if byte_array is SENTINEL:
+            # Indicate that the server is not ready while repopulating
+            server_ready_event.clear()
+            # Repopulate the queue in the background
+            asyncio.create_task(producer_task())
+            await find_dominate_gene_from_pool()
+            await asyncio.sleep(0)
+            return await handle_client(request)
+        elif byte_array == 'STOP':
+            ready = False
+            # Indicate that the server is not ready while repopulating
+            server_ready_event.clear()
+            # Save the pool before stopping - Doing it here
+            # so is saved only once.
+            gp.save(overwrite=False)
+            raise asyncio.TimeoutError('STOP')
+            
+    except asyncio.TimeoutError:
+        if ready:
+            LOG.debug(f'Server temporarily unavailable. epochs={epochs_remaining}, ready={server_ready_event.is_set()}, {tx_queue.qsize()} items in queue.')
+            return web.Response(status=204, text="Server temporarily unavailable.")
+        else:
+            LOG.debug(f'All epochs have been served.')
+            return web.Response(status=408, text='STOP')
+    except Exception as e:
+        LOG.error(f"Error in handle_client: {e}", exc_info=True)
+        return web.Response(status=500, text='Server error')
     else:
-        first_run = False
+        return web.Response(status=202, body=byte_array, ) 
 
-    if args.track_gen:
-        track_generations = True
+async def handle_returned_data(request):
+    """Handler for client requests to return processed byte arrays."""
+    try:
+        data = await request.content.read()
+        
+        i, j = np.frombuffer(data[:4], dtype=np.uint16)
+        async with lock:
+            gp[i] = data[4:tape_length+4]
+            gp[j] = data[tape_length+4:]
+
+        LOG.debug(f'Checked in tapes {i} and {j}')
+    except Exception as e:
+        LOG.error(f"Error in handle_returned_data: {e}", exc_info=True)
+        return web.Response(status=500, text='Server error')
     else:
-        track_generations = False
+        return await handle_client(request) 
 
-    sm = ServerMain(
-        host = args.host,
-        port = int(args.port),
-        epochs = int(args.epoch),
-        pool_size = int(args.pool_size),
-        tape_length = int(args.tape_length),
-        experiment_name = args.experiment_name,
-        first_run = first_run,
-        track_generations = track_generations,
-    )
-    
-    LOG.info(f'Server [{args.experiment_name}] initialized on {args.host}:{args.port}')
-    sm.run_server() 
+async def main():
+    # Start the producer task to populate the queue
+    # asyncio.create_task(producer_task())
+    await producer_task()
+
+    # Set up the web server
+    app = web.Application()
+    app.router.add_get('/get', handle_client)
+    app.router.add_post('/post', handle_returned_data)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, 'localhost', 8080)
+    await site.start()
+
+    print("Server running on http://localhost:8080")
+
+    # Keep the server running
+    while True:
+        await asyncio.sleep(3600)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())

@@ -1,12 +1,101 @@
 import secrets
 import numpy as np
+import matplotlib.pyplot as plt
 import base64
 import time
 from pathlib import Path
 import asyncio
-
-
 random_array = lambda size: np.array([secrets.randbits(8) for _ in range(size)], dtype=np.uint8)
+
+# Mapping instructions to characters
+instruction_mapping = {
+    100: '>',  # Move head 0 forward
+    101: '<',  # Move head 0 backward
+    102: '}',  # Move head 1 forward
+    103: '{',  # Move head 1 backward
+    104: '+',  # Increment value at head 0
+    105: '-',  # Decrement value at head 0
+    106: '+',  # Increment value at head 1
+    107: '-',  # Decrement value at head 1
+    108: 'r',  # Copy value from head 1 to head 0 or vice versa
+    109: 'w',  # Move value from head 0 to head 1 or vice versa
+    110: '[',  # Loop start
+    111: ']',  # Loop end
+}
+
+# Reverse mapping
+instruction_mapping_reverse = {v: k for k, v in instruction_mapping.items()}
+
+rng = np.random.default_rng()
+
+def array_to_string(arr: np.ndarray[np.uint8]) -> str:
+    return ''.join([instruction_mapping.get(x, '.') for x in arr])
+
+def string_to_array(s: str, null_byte: int = 1) -> np.ndarray[np.uint8]:
+    return np.array([instruction_mapping.get(x, null_byte) for x in s], dtype=np.uint8)
+
+def create_gene_pool_pdf(pool: np.ndarray[np.uint8], pool_size: int, tape_length: int) -> np.ndarray[np.float32]:
+    '''Returns a probability distribution of the gene pool, by position'''
+    pool = pool.reshape(pool_size, tape_length).copy()
+    matrix = np.zeros([256, tape_length], dtype=np.float32)
+
+    for i in range(256):
+        matrix[i, :] = np.count_nonzero(pool == i, axis=0)
+
+    return matrix / pool_size
+
+def replicator_gene_from_pdf(pdf: np.ndarray, tape_length: int) -> np.ndarray[np.uint8]:
+    '''Returns a gene that can replicate the tape'''
+    gene = np.zeros(tape_length, dtype=np.uint8)
+    for i in range(tape_length):
+        gene[i] = np.argmax(pdf[:, i])
+
+    return gene
+
+def find_dominate_gene(pool: np.ndarray[np.uint8], pool_size: int, tape_length: int) -> np.ndarray[np.uint8]:
+    '''Returns the dominate gene in the gene pool'''
+    # Generate a PDF for the gene pool
+    pdf = create_gene_pool_pdf(pool, pool_size, tape_length)
+    
+    # Find the dominate gene
+    return replicator_gene_from_pdf(pdf, tape_length)
+
+def determine_gene_fitness(gene: np.ndarray[np.uint8]) -> tuple[str, float]:
+    # Determine the genes ability to replicate a random tape
+    gce = GeneticExchangeClient()
+    
+    tape_length = len(gene)
+
+    random_tape = rng.integers(0, 256, tape_length, dtype=np.uint8)
+    
+    tape = gce.run(np.concatenate([gene, random_tape], dtype=np.uint8).tobytes())
+
+    arr1 = np.frombuffer(tape[:tape_length], dtype=np.uint8)
+    arr2 = np.frombuffer(tape[tape_length:], dtype=np.uint8)
+    
+    # dist = cosine_similarity(arr1, arr2)
+
+    dist = hamming_similarity(arr1, arr2)
+
+    return array_to_string(gene), dist
+
+def hamming_similarity(a: np.ndarray[np.uint8], b: np.ndarray[np.uint8]) -> int:
+    '''Returns the hamming distance between two arrays'''
+    x = a ^ b
+    return 1 - np.sum(np.unpackbits(x)) / (len(a) * 8)
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    '''Returns the cosine distance between two arrays'''
+    return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+def plot_pdf(pdf: np.ndarray[np.uint16]):
+    '''Plots the probability distribution of the gene pool'''
+    plt.imshow(pdf, aspect='auto', cmap='hot', interpolation='nearest')
+    plt.colorbar(label='Probability')
+    plt.xlabel('Position')
+    plt.ylabel('Byte Value')
+    plt.title('Byte Value Probability Distribution by Position')
+    plt.show()
 
 def encoder64(a: np.ndarray[np.uint8] | bytes) -> str:
     '''Converts a numpy array of uint8 to a base64 encoded string'''
@@ -83,6 +172,14 @@ def create_head_position_lookup_table(mod: int):
 
     return add_ + add, pos_ + pos, sub_ + sub
 
+def create_modulo_lookup_table(mod: int):
+    '''Returns a lookup table for the mod function'''
+    pos_ = [0 + x for x in range(mod)]
+    add_ = [(x + 1) % mod for x in pos_]
+    sub_ = [(x - 1) % mod for x in pos_]
+    
+    return add_, pos_, sub_
+
 def head_position(table: tuple, head: int, add: bool = False, sub: bool = False):
     '''Returns the new head position'''
     add_, pos_, sub_ = table
@@ -92,7 +189,30 @@ def head_position(table: tuple, head: int, add: bool = False, sub: bool = False)
         return sub_[head]
     else:
         return pos_[head]
+
+def visualize_tape(i, h0, h1, tape, mapping: dict = instruction_mapping):
+    # ANSI color codes for highlighting
+    GREEN_BG = '\033[42m'
+    RED_BG = '\033[41m'
+    YELLOW_BG = '\033[43m'
+    RESET = '\033[0m'
+
+    output = []
+    for index, byte in enumerate(tape):
+        char = mapping.get(byte, '.')
+        
+        if index == i:
+            char = f'{GREEN_BG}{char}{RESET}'
+        elif index == h0:
+            char = f'{RED_BG}{char}{RESET}'
+        elif index == h1:
+            char = f'{YELLOW_BG}{char}{RESET}'
+
+        output.append(char)
     
+    # * 5 prevents extra characters from being printed at the end
+    print('\r' + ''.join(output) + ' ' * 5, end='', flush=True)
+
     
 class GeneticExchangeClient:
     def __init__(self):
@@ -101,32 +221,41 @@ class GeneticExchangeClient:
         self.index_or_loop_errors = 0
         self.times = []
         self.rng = np.random.default_rng()
-        self.instruction_set = {100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111}
+        self.instruction_set = {k for k in instruction_mapping.keys()}
         self.first_run = True
+    
+    def __setattr__(self, name, value):
+        if name == 'tape_length':
+            if value % 2 == 0:
+                self.tape_midpoint = value // 2
+            else:
+                raise ValueError('Tape length must be an even number')
+        
+        super().__setattr__(name, value)
 
     def execute_instruction(self, inst: int, i: int, h0: int, h1:int, tape: np.ndarray) -> tuple:
         '''Executes the instruction and returns the updated state'''
         # Moving header 0
         if inst == 100:
-            h0 = head_position(self.table, h0, add=True)
+            h0 = head_position(self.head_table, h0, add=True)
         elif inst == 101:
-            h0 = head_position(self.table, h0, sub=True)
+            h0 = head_position(self.head_table, h0, sub=True)
         
         # Moving header 1
         elif inst == 102:
-            h1 = head_position(self.table, h1, add=True)
+            h1 = head_position(self.head_table, h1, add=True)
         elif inst == 103:
-            h1 = head_position(self.table, h1, sub=True)
+            h1 = head_position(self.head_table, h1, sub=True)
 
         # Transforming values
         elif inst == 104:
-            tape[h0] += 1
+            tape[h0] = head_position(self.mod_table, tape[h0], add=True)
         elif inst == 105:
-            tape[h0] -= 1
+            tape[h0] = head_position(self.mod_table, tape[h0], sub=True)
         elif inst == 106:
-            tape[h1] += 1
+            tape[h1] = head_position(self.mod_table, tape[h1], add=True)
         elif inst == 107:
-            tape[h1] -= 1
+            tape[h1] = head_position(self.mod_table, tape[h1], sub=True)
 
         # Read from
         elif inst == 108:
@@ -152,7 +281,6 @@ class GeneticExchangeClient:
                 # Loop is not over or unbounded, move to the next instruction
                 pass
 
-
         elif inst == 111:
             # This should raise if no matching bracket is found
             chk = np.where(tape[:i] == 110)[0][-1]
@@ -167,38 +295,27 @@ class GeneticExchangeClient:
         return i, h0, h1, tape
 
     def run(self, tape: bytes) -> bytes:
-        '''
-        Run the genetic exchange algorithm on the tape.
-        
-        tape : must be a numpy array of uint8 values.
-        '''
-        tape = np.frombuffer(tape, dtype=np.uint8)
-        tape = tape.copy()
+        tape = np.frombuffer(tape, dtype=np.uint8).copy()
 
         if self.first_run:
             self.tape_length = len(tape)
-            if self.tape_length % 2 != 0:
-                raise ValueError('Tape length must be even.')
-            self.tape_midpoint = self.tape_length // 2
-            self.table = create_head_position_lookup_table(self.tape_midpoint)
+            self.head_table = create_head_position_lookup_table(self.tape_midpoint)
+            self.mod_table = create_modulo_lookup_table(256)
             self.first_run = False
         else:
             if len(tape) != self.tape_length:
-                raise ValueError('Tape length has changed.')
+                raise ValueError(f'Tape length has changed. Expected {self.tape_length}, received {len(tape)}')
 
         try:
             t0 = time.time()
-            i = 0
-            h0 = 0
-            h1 = self.tape_midpoint
-            reads = 0
-            instruction_count = 0
+            h0, h1 = 0, self.tape_midpoint
+            i, cnt, reads = 0, 0, 0
 
             while True:
                 inst = tape[i]
                 
                 if inst in self.instruction_set:
-                    instruction_count += 1
+                    cnt += 1
                     i, h0, h1, tape = self.execute_instruction(inst, i, h0, h1, tape)
 
                 if reads < 10000:
@@ -209,89 +326,35 @@ class GeneticExchangeClient:
 
         except IndexError:
             if i == self.tape_length:
-                # print('\nEnd of tape reached')
                 pass
             else:
                 self.index_or_loop_errors += 1
-                # print('\nIndex error', i, h0, h1, inst)
         except StopIteration:
-            # print('\nToo many reads')
             self.read_errors += 1
         except Exception as e:
-            print(f'Run Error: {e}')
+            raise e
         finally:
-            self.instruction_counts.append(instruction_count)
+            self.instruction_counts.append(cnt)
             self.times.append(time.time() - t0)
 
             return tape.tobytes()
         
     def visualize(self, tape: bytes, sleep_time: float = 0.2) -> bytes:
-        '''
-        Run the genetic exchange algorithm on the tape.
-        
-        tape : must be a numpy array of uint8 values.
-        '''
-        tape = np.frombuffer(tape, dtype=np.uint8)
-        tape = tape.copy()
+        tape = np.frombuffer(tape, dtype=np.uint8).copy()
 
         if self.first_run:
             self.tape_length = len(tape)
-            if self.tape_length % 2 != 0:
-                raise ValueError('Tape length must be even.')
-            self.tape_midpoint = self.tape_length // 2
-            self.table = create_head_position_lookup_table(self.tape_midpoint)
+            self.head_table = create_head_position_lookup_table(self.tape_midpoint)
+            self.mod_table = create_modulo_lookup_table(256)
             self.first_run = False
         else:
             if len(tape) != self.tape_length:
-                raise ValueError('Tape length has changed.')
-
-        # Mapping instructions to characters
-        instruction_to_char = {
-            100: '>',  # Move head 0 forward
-            101: '<',  # Move head 0 backward
-            102: '}',  # Move head 1 forward
-            103: '{',  # Move head 1 backward
-            104: '+',  # Increment value at head 0
-            105: '-',  # Decrement value at head 0
-            106: '+',  # Increment value at head 1
-            107: '-',  # Decrement value at head 1
-            108: 'r',  # Copy value from head 1 to head 0 or vice versa
-            109: 'w',  # Move value from head 0 to head 1 or vice versa
-            110: '[',  # Loop start
-            111: ']',  # Loop end
-        }
-
-        # ANSI color codes for highlighting
-        GREEN_BG = '\033[42m'
-        RED_BG = '\033[41m'
-        YELLOW_BG = '\033[43m'
-        RESET = '\033[0m'
-
-        # Initialize visualization string
-        visualization = []
-
-        # Initial tape visualization
-        def visualize_tape(i, h0, h1, tape):
-            output = []
-            for index, byte in enumerate(tape):
-                char = instruction_to_char.get(byte, '.')
-                if index == i:
-                    char = f'{GREEN_BG}{char}{RESET}'
-                elif index == h0:
-                    char = f'{RED_BG}{char}{RESET}'
-                elif index == h1:
-                    char = f'{YELLOW_BG}{char}{RESET}'
-                output.append(char)
-            # * 5 prevents extra characters from being printed at the end
-            print('\r' + ''.join(output) + ' ' * 5, end='', flush=True)
+                raise ValueError(f'Tape length has changed. Expected {self.tape_length}, received {len(tape)}')
 
         try:
             t0 = time.time()
-            i = 0
-            h0 = 0
-            h1 = self.tape_midpoint
-            reads = 0
-            instruction_count = 0
+            h0, h1 = 0, self.tape_midpoint
+            i, cnt, reads = 0, 0, 0
 
             # Print the initial state
             visualize_tape(i, h0, h1, tape)
@@ -300,12 +363,8 @@ class GeneticExchangeClient:
                 inst = tape[i]
                 reads += 1
 
-                # Append the visual representation of the current instruction
-                # visualization.append(instruction_to_char.get(inst, '.'))
-                visualization.append(str(tape[i]))
-                
                 if inst in self.instruction_set:
-                    instruction_count += 1
+                    cnt += 1
                     i, h0, h1, tape = self.execute_instruction(inst, i, h0, h1, tape)
 
                 if reads < 10000:
@@ -315,7 +374,8 @@ class GeneticExchangeClient:
     
                 # Visualize the tape after each step
                 visualize_tape(i, h0, h1, tape)
-                time.sleep(sleep_time)  # Add a small delay for better visualization
+                # Add a small delay for better visualization
+                time.sleep(sleep_time)  
 
         except IndexError:
             if i == self.tape_length:
@@ -329,10 +389,8 @@ class GeneticExchangeClient:
         except Exception as e:
             print(f'Run Error: {e}')
         finally:
-            self.instruction_counts.append(instruction_count)
+            self.instruction_counts.append(cnt)
             self.times.append(time.time() - t0)
-
-            print(' '.join(visualization))
 
             return tape
 
@@ -347,16 +405,16 @@ class GeneticPool:
         else:
             self.filename = 'genetic_pool'
 
-    def __getitem__(self, key: int):
+    def __getitem__(self, key: int) -> bytes:
         start = key * self.tape_length
         stop = start + self.tape_length
         return self.pool[start:stop]
 
-    def __setitem__(self, key: int, value: np.ndarray):
+    def __setitem__(self, key: int, value: bytes):
         if len(value) != self.tape_length:
             raise ValueError('Value length must match tape length')
-        elif value.dtype != np.uint8:
-            raise ValueError('Value must be of type np.uint8')
+        elif not isinstance(value, bytes):
+            raise ValueError(f'Value must be of type bytes. Received {type(value)}')
         else:
             start = key * self.tape_length
             stop = start + self.tape_length
@@ -394,33 +452,16 @@ class GeneticPool:
             else:
                 inst += 1
 
-                if j == 100:
-                    t.append('<')
-                elif j == 101:
-                    t.append('>')
-                elif j == 102:
-                    t.append('{')
-                elif j == 103:
-                    t.append('}')
-                elif j in {104, 106}:
-                    t.append('+')
-                elif j in {105, 107}:
-                    t.append('-')
-                elif j == 108:
-                    t.append('r')
-                elif j == 109:
-                    t.append('w')
-                elif j == 110:
-                    t.append('[')
-                elif j == 111:
-                    t.append(']')
+                c = instruction_mapping[j]
+                t.append(c)
         
         self.instruction_ratio = inst / self.size
 
         self.pool_string = ''.join(t)
     
     def create(self):
-        self.pool = np.array([secrets.randbits(8) for _ in range(self.size)], dtype=np.uint8)
+        pool = np.array([secrets.randbits(8) for _ in range(self.size)], dtype=np.uint8).tobytes()
+        self.pool = bytearray(pool)
     
     def save(self, overwrite: bool = False):
         new_path = Path(f'{self.filename}_0.npz')
@@ -472,7 +513,9 @@ class GeneticPool:
 
         print(f'Loading: {fn}')
 
-        self.pool = np.load(fn)['arr_0']
+        pool = np.load(fn)['arr_0']
+
+        self.pool = bytearray(pool.tobytes())
 
         if len(self.pool) != self.size:
             raise ValueError('Loaded pool size does not match the expected size')
@@ -485,7 +528,6 @@ class PoolServer:
         self.tape_length = int(tape_length)
         self.experiment_path = experiment_path
         self.pool = GeneticPool(self.pool_size, self.tape_length, experiment_path)
-        # self.pool.save(overwrite=True)
         self.rng = np.random.default_rng()
         self.epochs_plan()
         self.epoch = None

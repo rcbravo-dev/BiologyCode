@@ -50,6 +50,7 @@ logging.config.dictConfig(cfg.logging_config)
 # Include in each module:
 LOG = logging.getLogger('CLIENT')
 LOG.debug("Client logging is configured.")
+LOG.setLevel(logging.INFO)
 
 class Client:
     def __init__(self,
@@ -155,27 +156,45 @@ class ClientABC:
             os.makedirs(self.client_path)
         self.header = np.array([10], dtype=np.uint8)
         self.gce = GeneticExchangeClient()
+        self.sleep_count = 10
+        self.sleep_time = 0.1
 
     async def worker(self) -> str:
-        async with aiohttp.ClientSession() as session:
-
-            response = await session.post(self.url, data='NEW WORKER')
-            
-            url = f'{self.url}/stream'
-
-            while response.status == 202:
-                tape = await response.read()
+        try:
+            async with aiohttp.ClientSession() as session:
                 
-                tape = self.gce.run(tape)
-                response = await session.post(url, data=tape)
-                # print(f"Message - {tape[:10]}")
+                response = await session.get(f'{self.url}/get', data='NEW WORKER')
+                
+                while response.status == 202:
+                    data = await response.read()
 
-            await self.status_handler(response)
+                    header = data[:4]
+                    tape = data[4:]
+                    
+                    tape = self.gce.run(tape)
+                    response = await session.post(f'{self.url}/post', data=header + tape)
+                    LOG.debug(f"Message - {tape[:10]}, response - {response.status} {self.client_name}")
+
+                await self.status_handler(response)
+        except aiohttp.client_exceptions.ServerDisconnectedError as e:
+            print(f'Connection to server lost: {e}')
+            await self.work_waiter()
+        except Exception as e:
+            LOG.error(f'worker error={e}', exc_info=True)
+            raise(e)
 
     async def status_handler(self, response: aiohttp.ClientResponse) -> None:
+        print(f'Client: {self.client_name}')
+        
         msg = await response.text()
 
         if response.status == 204:
+            print(f'Server temporarily unavailable.')
+            print()
+            await self.work_waiter()
+        elif response.status == 400:
+            print(f'ValueError. Status: {response.status} {msg}')
+        elif response.status == 408:
             print(f'All tapes have been processed. Status: {response.status} {msg}')
             print(f'Runs: {len(self.gce.times)}')
             print(f'Instruction Counts: {np.sum(self.gce.instruction_counts)}')
@@ -183,12 +202,17 @@ class ClientABC:
             print(f'Average Time: {np.mean(self.gce.times)}')
             print(f'Index or Loop Errors: {self.gce.index_or_loop_errors}')
             print()
-        elif response.status == 400:
-            print(f'ValueError. Status: {response.status} {msg}')
-        elif response.status == 408:
-            print(f'Timeout. Status: {response.status} {msg}')
         else:
-            print(f'Error Status: {response.status}')
+            print(f'Worker Error Status: {response.status} {msg}')
+
+    async def work_waiter(self) -> None:
+        await asyncio.sleep(self.sleep_time)
+        self.sleep_count -= 1
+        self.sleep_time += 0.1
+        if self.sleep_count == 0:
+            raise TimeoutError('Server is not responding after 10 tries.')
+        else:
+            await self.worker()
 
 
 # Example usage

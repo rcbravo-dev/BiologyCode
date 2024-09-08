@@ -112,7 +112,7 @@ USER = getpass.getuser()
 INSTALL_PATH = f'/Users/Shared/SharedProjects/Projects/{GROUP_NAME}/{APPLICATION_NAME}'
 
 # Logging
-LOG_LEVEL = 'INFO'
+LOG_LEVEL = 'DEBUG'
 LOG_STACK = False
 LOG_EXC = False
 
