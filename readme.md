@@ -1,4 +1,4 @@
-### Draft of README.md by ChatGPT
+# Draft of README.md by ChatGPT
 
 
 # Self-Replicating Programs Simulation
@@ -22,8 +22,9 @@ To run the simulation, you need Python 3.x and the following libraries:
 - `numpy`
 - `asyncio`
 - `argparse`
+- `aiohttp`
 
-Install the required libraries using:
+Install the required libraries using the example below:
 
 ```bash
 pip install numpy
@@ -36,7 +37,7 @@ pip install numpy
 Run the server with the following command:
 
 ```bash
-python server.py -hs localhost -p 8080 -e 100 -ps 512 -t 64 -m 0.05 -en 'experiment_name' --track_gen
+python3 server -hs localhost -p 8080 -e 100 -ps 512 -t 64 -m 0.05 -en 'experiment_name' --track_gen
 ```
 
 - **Arguments:**
@@ -51,7 +52,16 @@ python server.py -hs localhost -p 8080 -e 100 -ps 512 -t 64 -m 0.05 -en 'experim
 
 2. **Client Interaction:**
 
-Use the `client.py` to interact with the server for real-time updates or modifications to the genetic pool.
+Use `client.py` to interact with the server an programatically combine tapes from the genetic pool managed by the server.
+
+```bash
+python3 -m client --work -hs 'localhost' -p 8080 -c alice
+```
+
+- **Arguments:**
+  - `-hs` or `--host`: Host IP or "localhost".
+  - `-p` or `--port`: Server port (default: 8080).
+  - `-c` : Client name.
 
 ## Attribution
 
