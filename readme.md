@@ -63,6 +63,20 @@ python3 -m client --work -hs 'localhost' -p 8080 -c alice
   - `-p` or `--port`: Server port (default: 8080).
   - `-c` : Client name.
 
+3. **Normal Operations:**
+Once the server has started and the client is being served tapes, stdout is set to display the dominant gene in the genetic pool at the completion of each epoch. The string representation of the tape is displayed followed by a fitness score. A 1.0 fitness score indicates 100% replication, whereas a 0.5 score represents no significant replication. 
+
+```bash
+Dominant Gene: w[www[.w{<w{<.........]]...]......w.....]...........r.........{{, fitness: 1.0, epochs: 6
+Dominant Gene: w[www[.w{<.{<.........]]...]............]...........r........>{., fitness: 0.767578125, epochs: 5
+Dominant Gene: w[www[<w{<.{<.........]]...]............].....................{<, fitness: 0.572265625, epochs: 4
+Dominant Gene: w[www[<w{<.{<.........]]]..]............].....................{], fitness: 0.556640625, epochs: 3
+Dominant Gene: w[www[<{{<.{<<........]]...]......w.....].....................{<, fitness: 0.513671875, epochs: 2
+Dominant Gene: w[www[<{{<.{<<........]]...]............].....................{<, fitness: 0.501953125, epochs: 1
+Dominant Gene: w[www[<w{<.{<<........]]]..]............].....................{], fitness: 0.55078125, epochs: 0
+```
+
+
 ## Attribution
 
 This project is inspired by the research paper:
