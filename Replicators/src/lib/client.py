@@ -39,30 +39,33 @@ sys.path.insert(0, os.path.abspath(os.path.join(script_dir, '..')))
 
 from lib.codebase import GeneticExchangeClient
 from lib.configurator import configurations as cfg
+from lib.utilities import valid_log_level
 
 # Run once in the main script
 logging.config.dictConfig(cfg.logging_config)
 
 # Include in each module:
 LOG = logging.getLogger('CLIENT')
-LOG.debug("Client logging is configured.")
-LOG.setLevel(logging.INFO)
 
 
 class Client:
     def __init__(self, host: str, port: int, client_name: str) -> None:
         self.url = f'http://{host}:{port}'
         self.client_name = client_name
-        self.data_path = cfg.data_path
-        self.client_path = f'{self.data_path}/clients/{self.client_name}'
+        self.client_path = f'{cfg.data_path}/clients/{self.client_name}'
+        self.sleep_count = cfg.cli_sleep_count
+        self.sleep_time = cfg.cli_sleep_time
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        # Inintialize the GeneticExchangeClient tasked with running the tapes
+        self.gce = GeneticExchangeClient()
+
         if not os.path.exists(self.client_path):
             os.makedirs(self.client_path)
-        self.header = np.array([10], dtype=np.uint8)
-        self.gce = GeneticExchangeClient()
-        self.sleep_count = 10
-        self.sleep_time = 0.1
-
+        
     async def worker(self) -> str:
+        '''Get a tape to work on.'''
         try:
             async with aiohttp.ClientSession() as session:
                 
@@ -80,13 +83,14 @@ class Client:
 
                 await self.status_handler(response)
         except aiohttp.client_exceptions.ServerDisconnectedError as e:
-            print(f'Connection to server lost: {e}')
-            await self.work_waiter()
+            LOG.warning(f'Connection to server lost: {e}')
+            await self._work_waiter()
         except Exception as e:
             LOG.error(f'worker error={e}', exc_info=True)
             raise(e)
         
     async def reset(self) -> str:
+        '''Reset the server and get a new tape to work on.'''
         try:
             async with aiohttp.ClientSession() as session:
                 
@@ -104,61 +108,69 @@ class Client:
 
                 await self.status_handler(response)
         except aiohttp.client_exceptions.ServerDisconnectedError as e:
-            print(f'Connection to server lost: {e}')
-            await self.work_waiter()
+            LOG.warning(f'Connection to server lost: {e}')
+            await self._work_waiter()
         except Exception as e:
             LOG.error(f'worker error={e}', exc_info=True)
             raise(e)
 
     async def status_handler(self, response: aiohttp.ClientResponse) -> None:
-        print(f'Client: {self.client_name}')
-        
+        '''Handle the response from the server.'''
         msg = await response.text()
 
         if response.status == 204:
-            print(f'Server temporarily unavailable.')
-            print()
-            await self.work_waiter()
+            LOG.info(f'Server temporarily unavailable.')
+            await self._work_waiter()
         elif response.status == 400:
-            print(f'ValueError. Status: {response.status} {msg}')
+            LOG.error(f'ValueError. Status: {response.status} {msg}')
         elif response.status == 408:
-            print(f'All tapes have been processed. Status: {response.status} {msg}')
-            print(f'Runs: {len(self.gce.times)}')
-            print(f'Instruction Counts: {np.sum(self.gce.instruction_counts)}')
-            print(f'Total Time: {np.sum(self.gce.times)}')
-            print(f'Average Time: {np.mean(self.gce.times)}')
-            print(f'Loop Errors: {self.gce.loop_errors}')
-            print(f'Max Read Errors: {self.gce.exaustion_errors}')
-            print()
+            LOG.info(f'''{self.client_name.upper()} has finished work. 
+            Status: {response.status} {msg}
+            Runs: {len(self.gce.times)}, Instruction Counts: {np.sum(self.gce.instruction_counts)}
+            Total Time: {round(np.sum(self.gce.times), 4)}, Average Time: {round(np.mean(self.gce.times), 4)}
+            Loop Errors: {self.gce.loop_errors}, Max Read Errors: {self.gce.exaustion_errors}
+            ''')
         else:
-            print(f'Worker Error Status: {response.status} {msg}')
+            LOG.error(f'Worker Error Status: {response.status} {msg}')
 
-    async def work_waiter(self) -> None:
+    async def _work_waiter(self) -> None:
+        '''Wait for the server to become available.'''
         await asyncio.sleep(self.sleep_time)
         self.sleep_count -= 1
         self.sleep_time += 0.1
         if self.sleep_count == 0:
-            raise TimeoutError('Server is not responding after 10 tries.')
+            LOG.warning('Server is not responding after 10 tries.')
         else:
             await self.worker()
 
 
 # Example usage
-# python3 -m client --work -hs 'localhost' -p 8080 -c alice
+# python3 -m client --work -hs 'localhost' -p 8080 -c alice -v --log-level info
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Send a message in bytes format to a server.')
     
     parser.add_argument('--work', action='store_true', help='Start worker.')
     parser.add_argument('--reset', action='store_true', help='Reset Server.')
-    parser.add_argument('-hs', '--host', default='localhost', help='ip address or "localhost" of server.')  
-    parser.add_argument('-p', '--port', default=9999, help='Port of server.') 
-    parser.add_argument('-c', '--client_name', default='alice', help='Name of the worker client.')
+    parser.add_argument('-hs', '--host', type=str, default=cfg.api_host, help='ip address or "localhost" of server.')  
+    parser.add_argument('-p', '--port', type=int, default=cfg.api_port, help='Port of server.') 
+    parser.add_argument('-c', '--client_name', type=str, default='alice', help='Name of the worker client.')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Increase output verbosity.')
+    parser.add_argument('--log-level', type=valid_log_level, default=cfg.log_level, 
+                        help=f'Set the logging level. Choose from DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is {cfg.log_level}.')
     args = parser.parse_args()
+
+    # Logging
+    logging.config.dictConfig(cfg.logging_config)
+    if args.verbose:
+        LOG = logging.getLogger('VERBOSE_CLIENT')
+    LOG.setLevel(args.log_level)
+    LOG.debug("Client logging is configured.")
     
+    # Initialize the Client
     client = Client(
         host = args.host,
-        port = int(args.port),
+        port = args.port,
         client_name = args.client_name,
     )
 

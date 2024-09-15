@@ -74,7 +74,6 @@ class Configurator:
         else:
             raise ValueError(f"Invalid parameter: {name}")
 
-
 def configuration_test(config: Configurator, verbose: bool = False):
     try:
         # Test that lock works
@@ -112,14 +111,12 @@ USER = getpass.getuser()
 INSTALL_PATH = f'/Users/Shared/SharedProjects/Projects/{GROUP_NAME}/{APPLICATION_NAME}'
 
 # Logging
-LOG_LEVEL = 'DEBUG'
-LOG_STACK = False
-LOG_EXC = False
+LOG_LEVEL = 'INFO'
 
 # Networking
 API_HOST = 'localhost'
 API_PORT = 9999
-HANDLER_TIMEOUT = 10.0
+HANDLER_TIMEOUT = 5.0
 
 # Encryption
 BITS = 8
@@ -139,8 +136,6 @@ PARAMS = {
     # Logging
     'log_level': LOG_LEVEL,
     'log_level_option': {'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'},
-    'log_stack': LOG_STACK,
-    'log_exc': LOG_EXC,
 
     # Objects
     'rng': npr.default_rng(SEED),
@@ -149,7 +144,25 @@ PARAMS = {
     'api_host': API_HOST,
     'api_port': API_PORT,
     'chunk_size': 1024,
+
+    # Client
+    'cli_sleep_count': 10,
+    'cli_sleep_count_range': (3, 100),
+    'cli_sleep_time': 0.1,
+    'cli_sleep_time_range': (0.01, 1.0),
+
+    # Server
     'handler_timeout': HANDLER_TIMEOUT,
+    'srv_sleep_count': 10,
+    'srv_sleep_time': 0.1,
+    'epochs': 10,
+    'epochs_range': (1, 1024),
+    'pool_size': 100,
+    'pool_size_range': (10, 2048),
+    'tape_length': 64,
+    'tape_length_option': (16, 32, 64, 128, 256, 512, 1024),
+    'mutation_rate': 0.05,
+    'mutation_rate_range': (0.0, 1.0),
 
     # Logging
     # 'https://stackoverflow.com/questions/7507825/where-is-a-complete-example-of-logging-config-dictconfig#7507842'
@@ -158,14 +171,20 @@ PARAMS = {
         'disable_existing_loggers': True,
         'formatters': { 
             'standard': { 
-                'format': '[%(levelname)s] %(asctime)s, %(name)s : %(message)s',
+                # This has the loggers name in it
+                # 'format': '[%(levelname)s] %(asctime)s, %(name)s : %(message)s',
+                'format': '[%(levelname)s] %(asctime)s: %(message)s',
+                'datefmt': '%j %H:%M:%S',  # Julian day, 24-hour clock
+            },
+            'console_format': { 
+                'format': '[%(levelname)s] %(asctime)s: %(message)s',
                 'datefmt': '%j %H:%M:%S',  # Julian day, 24-hour clock
             },
         },
         'handlers': { 
             'console': { 
-                'level': 'WARNING',
-                'formatter': 'standard',
+                'level': LOG_LEVEL,
+                'formatter': 'console_format',
                 'class': 'logging.StreamHandler',
                 # Default is stderr
                 'stream': 'ext://sys.stdout',  
@@ -199,6 +218,11 @@ PARAMS = {
             },
             'CLIENT': { 
                 'handlers': ['clientFile'],
+                'level': LOG_LEVEL,
+                'propagate': False
+            },
+            'VERBOSE_CLIENT': { 
+                'handlers': ['console', 'clientFile'],
                 'level': LOG_LEVEL,
                 'propagate': False
             },

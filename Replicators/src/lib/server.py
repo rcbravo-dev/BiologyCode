@@ -42,46 +42,54 @@ sys.path.insert(0, os.path.abspath(os.path.join(script_dir, '..')))
 
 from lib.codebase import GeneticPool
 from lib.configurator import configurations as cfg
+from lib.utilities import valid_log_level
 
 # Run once in the main script
 logging.config.dictConfig(cfg.logging_config)
+
 # Include in each module:
 LOG = logging.getLogger('SERVER')
-LOG.debug("Server logging is configured.")
-LOG.setLevel(logging.INFO)
 
 
 class GeneticServer:
     def __init__(self, 
-                 host: str = 'localhost', 
-                 port: int = 8080, 
+                 host: str, 
+                 port: int, 
                  pool_size: int = 512, 
                  tape_length: int = 64, 
                  epochs: int = 100,
                  mutation_rate: float = 0.05,
                  experiment_name: str = 'run_001', 
                  track_generations: bool = True,
+                 verbose: bool = True,
                  ) -> None:
         self.host = host
         self.port = port
         self.pool_size = pool_size
         self.tape_length = tape_length
         self.epochs = epochs
-        self.epochs_remaining = epochs
+        self.epochs_remaining = self.epochs
         self.mutation_rate = mutation_rate
         self.path = f'{cfg.data_path}/server/{experiment_name}/'
-        self.rng = np.random.default_rng()
-        self.gp = GeneticPool(pool_size, tape_length, filename=self.path)
-        self.genes = {}
+        self.track_generations = track_generations
+        self.verbose = verbose
+        self.generator = None
+        self.first_run = True
+        self.time_out = cfg.handler_timeout
+        self.__post_init__()
+
+    def __post_init__(self):
+        '''Post initialization method.'''
+        self.rng = cfg.rng
+        self.gp = GeneticPool(self.pool_size, self.tape_length, filename=self.path)
         self.tx_queue = asyncio.Queue()
         self.SENTINEL = object()
         self.server_ready_event = asyncio.Event()
         self.lock = asyncio.Lock()
-        self.generator = None
-        self.first_run = True
-        self.track_generations = track_generations
+        self.genes = {}
 
     def initialize_server(self):
+        '''Initialize the server.'''
         if self.first_run:
             self.gp.create()
             self.gp.save(overwrite=True)
@@ -92,7 +100,7 @@ class GeneticServer:
     async def run_server(self):
         self.initialize_server()
 
-        await self.producer_task()
+        await self._producer_task()
 
         # Set up the web server
         app = web.Application()
@@ -111,18 +119,62 @@ class GeneticServer:
         while True:
             await asyncio.sleep(3600)
 
-    async def byte_array_generator(self):
-        # Async generator that yields 128-byte arrays
-        tapes = self.rng.permutation(self.pool_size).astype(np.uint16)
-        
-        for i, j in zip(tapes[0::2], tapes[1::2]):
-            header = np.array([i, j], dtype=np.uint16).tobytes()
-            # Pool should be a long byte string
-            tape_i = self.gp[i]
-            tape_j = self.gp[j]
-            yield header + tape_i + tape_j
+    async def handle_client(self, request):
+        """Handler for client requests to get byte arrays."""
+        try:
+            # Wait until the server is ready, but with a timeout
+            await asyncio.wait_for(self.server_ready_event.wait(), timeout=self.time_out)
 
-    async def producer_task(self):
+            # Get data from the queue
+            byte_array = await self.tx_queue.get()
+            
+            if byte_array is self.SENTINEL:
+                await self._on_epoch_completion()
+                return await self.handle_client(request)
+            
+            elif byte_array == 'STOP':
+                await self._on_epoch_completion()
+                await self._save_pool()
+                raise asyncio.TimeoutError('STOP')
+                
+        except asyncio.TimeoutError:
+            if self.epochs_remaining:
+                LOG.debug(f'Server temporarily unavailable. epochs={self.epochs_remaining}, ready={self.server_ready_event.is_set()}, {self.tx_queue.qsize()} items in queue.')
+                return web.Response(status=204, text="Server temporarily unavailable.")
+            else:
+                LOG.debug(f'All epochs have been served.')
+                return web.Response(status=408, text='STOP')
+        except Exception as e:
+            LOG.error(f"Error in handle_client: {e}", exc_info=True)
+            return web.Response(status=500, text='Server error')
+        else:
+            return web.Response(status=202, body=byte_array, ) 
+        
+    async def handle_reset(self, request):
+        self.epochs_remaining = self.epochs
+        await self._producer_task()
+        await asyncio.sleep(0)
+        return await self.handle_client(request)
+
+    async def handle_returned_data(self, request):
+        """Handler for client requests to return processed byte arrays."""
+        try:
+            data = await request.content.read()
+            tape_length = self.tape_length
+            
+            i, j = np.frombuffer(data[:4], dtype=np.uint16)
+            async with self.lock:
+                self.gp[i] = data[4:tape_length+4]
+                self.gp[j] = data[tape_length+4:]
+
+            LOG.debug(f'Checked in tapes {i} and {j}')
+        except Exception as e:
+            LOG.error(f"Error in handle_returned_data: {e}", exc_info=True)
+            return web.Response(status=500, text='Server error')
+        else:
+            return await self.handle_client(request) 
+
+    async def _producer_task(self):
         """Background task to populate the queue with byte arrays."""
         if self.epochs_remaining > 0:
             # Indicate that the server is not ready while repopulating
@@ -130,7 +182,7 @@ class GeneticServer:
 
             # Initialize the generator if it's not set
             if self.generator is None:
-                self.generator = self.byte_array_generator()
+                self.generator = self._byte_array_generator()
                 self.epochs_remaining -= 1
 
             # Repopulate the queue
@@ -159,129 +211,99 @@ class GeneticServer:
 
             LOG.debug(f'Epochs remaining: {self.epochs_remaining}')
 
-    async def handle_client(self, request):
-        """Handler for client requests to get byte arrays."""
-        try:
-            # Wait until the server is ready, but with a timeout
-            await asyncio.wait_for(self.server_ready_event.wait(), timeout=5)
-
-            # Get data from the queue
-            byte_array = await self.tx_queue.get()
-            
-            if byte_array is self.SENTINEL:
-                # Indicate that the server is not ready while repopulating
-                self.server_ready_event.clear()
-                # Find dominate gene from the pool before mutating
-                await self.find_dominate_gene_from_pool()
-                # Mutate the pool - must be done prior to repopulating the queue
-                await self.mutate_pool()
-                # Repopulate the queue with mutated tapes
-                await self.producer_task()
-                await asyncio.sleep(0)
-                return await self.handle_client(request)
-            
-            elif byte_array == 'STOP':
-                # Indicate that the server is not ready while repopulating
-                self.server_ready_event.clear()
-                # Find the dominate gene of epoch 0
-                await self.find_dominate_gene_from_pool()
-                # Save the pool before stopping - Doing it here
-                # so is saved only once.
-                if self.track_generations:
-                    self.gp.save(overwrite=False)
-                else:
-                    self.gp.save(overwrite=True)
-                # Log compression ratio
-                LOG.info(f'Compression ratio: {round(self.gp.compression_ratio, 4)} epoch: {self.epochs_remaining}')
-                raise asyncio.TimeoutError('STOP')
-                
-        except asyncio.TimeoutError:
-            if self.epochs_remaining:
-                LOG.debug(f'Server temporarily unavailable. epochs={self.epochs_remaining}, ready={self.server_ready_event.is_set()}, {self.tx_queue.qsize()} items in queue.')
-                return web.Response(status=204, text="Server temporarily unavailable.")
-            else:
-                LOG.debug(f'All epochs have been served.')
-                return web.Response(status=408, text='STOP')
-        except Exception as e:
-            LOG.error(f"Error in handle_client: {e}", exc_info=True)
-            return web.Response(status=500, text='Server error')
-        else:
-            return web.Response(status=202, body=byte_array, ) 
+    async def _byte_array_generator(self):
+        # Async generator that yields 128-byte arrays
+        tapes = self.rng.permutation(self.pool_size).astype(np.uint16)
         
-    async def handle_reset(self, request):
-        self.epochs_remaining = self.epochs
-        await self.mutate_pool()
-        await self.producer_task()
+        for i, j in zip(tapes[0::2], tapes[1::2]):
+            header = np.array([i, j], dtype=np.uint16).tobytes()
+            # Pool should be a long byte string
+            tape_i = self.gp[i]
+            tape_j = self.gp[j]
+            yield header + tape_i + tape_j
+
+    async def _on_epoch_completion(self):
+        '''Actions to take when an epoch is completed.'''
+        # Indicate that the server is not ready while repopulating
+        self.server_ready_event.clear()
+        # Find dominate gene from the pool before mutating
+        await self._find_dominate_gene_from_pool()
+        # Mutate the pool
+        await self._mutate_pool()
+        # Repopulate the queue with mutated tapes
+        await self._producer_task()
+        # Sleep to allow other tasks to run
         await asyncio.sleep(0)
-        return await self.handle_client(request)
 
-    async def handle_returned_data(self, request):
-        """Handler for client requests to return processed byte arrays."""
-        try:
-            data = await request.content.read()
-            tape_length = self.tape_length
-            
-            i, j = np.frombuffer(data[:4], dtype=np.uint16)
-            async with self.lock:
-                self.gp[i] = data[4:tape_length+4]
-                self.gp[j] = data[tape_length+4:]
-
-            LOG.debug(f'Checked in tapes {i} and {j}')
-        except Exception as e:
-            LOG.error(f"Error in handle_returned_data: {e}", exc_info=True)
-            return web.Response(status=500, text='Server error')
-        else:
-            return await self.handle_client(request) 
-    
-    async def mutate_pool(self):
+    async def _mutate_pool(self):
         actual_mutation_rate = self.gp.mutation(rate=self.mutation_rate)
         LOG.debug(f'Epoch {self.epochs_remaining} mutated pool with rate: {actual_mutation_rate}')
 
-    async def find_dominate_gene_from_pool(self) -> tuple[str, float]:
+    async def _find_dominate_gene_from_pool(self) -> tuple[str, float]:
         gene = self.gp.find_dominate_gene()
         gene_str, fitness = self.gp.determine_gene_fitness(gene)
 
         if gene_str not in self.genes:
             self.genes[gene_str] = fitness
         
-        print(f'Dominant Gene: {gene_str}, fitness: {fitness}, epochs: {self.epochs_remaining}')
+        if self.verbose:
+            print(f'Dominant Gene: {gene_str}, fitness: {fitness}, epochs: {self.epochs_remaining}')
         
-        # LOG.info(f'Dominant Gene: {gene_str}, fitness: {fitness}, epochs remaining: {epochs_remaining}')
+        LOG.debug(f'Dominant Gene: {gene_str}, fitness: {fitness}, epochs remaining: {self.epochs_remaining}')
+
+    async def _save_pool(self):
+        '''Save the pool.'''
+        # Save the pool before stopping - Doing it here
+        # so is saved only once.
+        if self.track_generations:
+            self.gp.save(overwrite=False)
+        else:
+            self.gp.save(overwrite=True, safe=False)
+        
+        # Log compression ratio
+        LOG.info(f'Pool saved after {self.epochs - self.epochs_remaining} epochs with a compression ratio of: {round(self.gp.compression_ratio, 4)}.')
 
 if __name__ == '__main__':
-    # python3 -m server -hs 'localhost' -p 8080 -e 100 -ps 512 -t 64 -m 0.05 -en 'run_001' --track_gen
+    # python3 -m server -hs 'localhost' -p 8080 -e 100 -ps 512 -t 64 -m 0.05 -en 'run_001' -v --track_gen
 
     parser = argparse.ArgumentParser(description='Server the GeneticCode.')
-    parser.add_argument('-hs', '--host', default='localhost', help='ip address or "localhost" of server.')  
-    parser.add_argument('-p', '--port', default=8080, help='Port of server.') 
-    parser.add_argument('-e', '--epoch', default=10, help='Number of times to run all tapes.')
-    parser.add_argument('-ps', '--pool_size', default=100, help='Number of tapes in the pool.')
-    parser.add_argument('-t', '--tape_length', default=64, help='Number of bytes in the tape.')
-    parser.add_argument('-m', '--mutation_rate', default=0.05, help='Rate of mutation.')
-    parser.add_argument('-en', '--experiment_name', default='run_001', help='Name of the genetic pool.')
+    parser.add_argument('-hs', '--host', default=cfg.api_host, type=str, help='ip address or "localhost" of server.')  
+    parser.add_argument('-p', '--port', default=cfg.api_port, type=int, help='Port of server.') 
+    parser.add_argument('-e', '--epoch', default=cfg.epochs, type=int, help='Number of times to run all tapes.')
+    parser.add_argument('-ps', '--pool_size', default=cfg.pool_size, type=int, help='Number of tapes in the pool.')
+    parser.add_argument('-t', '--tape_length', default=cfg.tape_length, type=int, help='Number of bytes in the tape.')
+    parser.add_argument('-m', '--mutation_rate', default=cfg.mutation_rate, type=float, help='Rate of mutation.')
+    parser.add_argument('-en', '--experiment_name', default='run_001', type=str, help='Name of the genetic pool.')
     parser.add_argument('--track_gen', action='store_true', help='Initialize the server and run forever.')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Increase output verbosity.')
+    parser.add_argument('--log-level', type=valid_log_level, default=cfg.log_level, 
+                        help=f'Set the logging level. Choose from DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is {cfg.log_level}.')
     args = parser.parse_args()
 
-    if args.track_gen:
-        track_generations = True
-    else:
-        track_generations = False
+    # Logging
+    logging.config.dictConfig(cfg.logging_config)
+    LOG.setLevel(args.log_level)
+    LOG.debug("Server logging is configured.")
 
     try:
         s = GeneticServer(
-            host = args.host,
-            port = int(args.port),
-            pool_size = int(args.pool_size),
-            tape_length = int(args.tape_length),
-            mutation_rate = float(args.mutation_rate),
-            epochs = int(args.epoch),
+            args.host,
+            args.port,
+            pool_size = args.pool_size,
+            tape_length = args.tape_length,
+            mutation_rate = args.mutation_rate,
+            epochs = args.epoch,
             experiment_name = args.experiment_name,
-            track_generations = track_generations,
+            track_generations = args.track_gen,
+            verbose = args.verbose,
         )
         asyncio.run(s.run_server())
     except KeyboardInterrupt:
-        # Save the pool before stopping
-        s.gp.save(overwrite=False)
+        if s.epoch_remaining:
+            # Save the pool before stopping if there are epochs remaining
+            # signifying that there was a stoppage and the server did not
+            # have a chance to save the pool.
+            s._save_pool()
 
         LOG.info('Server stopped by user.')
         print('Server stopped by user.', end='\n\n')

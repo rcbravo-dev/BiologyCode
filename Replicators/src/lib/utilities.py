@@ -1,5 +1,15 @@
 CWD = f'/Users/Shared/SharedProjects/Projects/BiologyCode/Replicators/'
 
+import argparse
+
+
+# Define a function to validate log level
+def valid_log_level(level):
+    levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+    if level.upper() not in levels:
+        raise argparse.ArgumentTypeError(f"Invalid log level: {level}. Choose from {levels}.")
+    return level.upper()
+
 
 def setup_logging(path: str = 'configs/logging_config.yaml') -> None:
 	import logging as log

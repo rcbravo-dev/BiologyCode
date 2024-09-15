@@ -467,33 +467,37 @@ class GeneticPoolABC:
 
         self.pool_string = ''.join(t)
     
+    def _find_new_path(self, new_path: Path):
+        suffix = new_path.suffix
+        counter = 1
+        while new_path.exists():
+            new_path = Path(f"{self.filename}_{counter}{suffix}")
+            counter += 1
+        return new_path
+    
     def create(self):
         pool = np.array([secrets.randbits(8) for _ in range(self.size)], dtype=np.uint8).tobytes()
         self.pool = bytearray(pool)
     
-    def save(self, overwrite: bool = False):
+    def save(self, overwrite: bool = False, safe: bool = True):
         new_path = Path(f'{self.filename}_0.npz')
-        suffix = new_path.suffix
-
+        
         # Make the directory if it does not exist
         if new_path.parent.exists() is False:
             new_path.parent.mkdir(parents=True)
 
-        def find_new_path(new_path: Path):
-            counter = 1
-            while new_path.exists():
-                new_path = Path(f"{self.filename}_{counter}{suffix}")
-                counter += 1
-            return new_path
-        
-        if overwrite:
-            x = input(f'Are you sure you want to overwrite the existing file: {new_path}? (y/n): ')
-            if x.lower() == 'y':
-                pass
+        # If False, then find a new path
+        elif new_path.exists() and overwrite is False:
+            new_path = self._find_new_path(new_path)
+
+        # If True, then overwrite the existing file
+        elif new_path.exists() and overwrite is True:
+            if safe:
+                x = input(f'Are you sure you want to overwrite the existing file: {new_path}? (y/n): ').lower()
+                if x == 'n':
+                    new_path = self._find_new_path(new_path)
             else:
-                new_path = find_new_path(new_path)
-        else:
-            new_path = find_new_path(new_path)
+                pass
 
         np.savez_compressed(new_path, self.pool)
 
