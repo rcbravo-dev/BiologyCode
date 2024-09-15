@@ -72,7 +72,7 @@ def find_dominate_gene(pool: np.ndarray[np.uint8], pool_size: int, tape_length: 
 
 def determine_gene_fitness(gene: np.ndarray[np.uint8]) -> tuple[str, float]:
     # Determine the genes ability to replicate a random tape
-    gce = GeneticExchangeClient()
+    gce = GeneticExchangeClient() # type: ignore
     
     tape_length = len(gene)
 
