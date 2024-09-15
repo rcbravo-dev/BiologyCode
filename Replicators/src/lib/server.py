@@ -299,7 +299,7 @@ if __name__ == '__main__':
         )
         asyncio.run(s.run_server())
     except KeyboardInterrupt:
-        if s.epoch_remaining:
+        if s.epochs_remaining:
             # Save the pool before stopping if there are epochs remaining
             # signifying that there was a stoppage and the server did not
             # have a chance to save the pool.
