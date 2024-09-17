@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import base64
 import time
 from pathlib import Path
-import asyncio
 
 
 random_array = lambda size: np.array([secrets.randbits(8) for _ in range(size)], dtype=np.uint8)
@@ -593,117 +592,7 @@ class GeneticPool(GeneticPoolABC):
     def plot_pdf(self):
         '''Plots the probability distribution of the gene pool'''
         plot_pdf(self.create_gene_pool_pdf())
-
-
-class PoolServer:
-    def __init__(self, epochs: int = 3, pool_size: int = 10, tape_length: int = 8, experiment_path: str = 'genetic_pool'):
-        self.epochs = int(epochs)
-        self.pool_size = int(pool_size)
-        self.tape_length = int(tape_length)
-        self.experiment_path = experiment_path
-        self.pool = GeneticPool(self.pool_size, self.tape_length, experiment_path)
-        self.rng = np.random.default_rng()
-        self.epochs_plan()
-        self.epoch = None
-        self.ready = False
-        self.sleep_time = 0.05
-
-    def update_pool(self):
-        tx = b''
-        for t in self.containerTX:
-            tx += t
-
-        self.pool.pool = np.frombuffer(tx, dtype=np.uint8)
-        
-    def __setattr__(self, name, value):
-        if name == 'pool_size':
-            if value > 65535:
-                raise ValueError('Pool size must be less than or equal to 65535')
-        elif name == 'tape_length':
-            if value % 2 != 0:
-                raise ValueError('Tape length must be an even number')
-        elif name == 'pool_size':
-            if value % 2 != 0:
-                raise ValueError('Pool size must be an even number')
-        
-        super().__setattr__(name, value)
-
-    def init_containers(self):
-        self.containerTX = []
-        self.containerRX = []
-        
-        for i in range(self.pool_size):
-            arr = self.pool[i].tobytes()
-            self.containerTX.append(arr)
-
-        self.ready = True
-
-    async def swap_containers(self):
-        if len(self.containerRX) == self.pool_size:
-            self.containerTX = self.containerRX.copy()
-            self.containerRX = []
-        else:
-            # Raises an error if the containerRX is not full after 10 tries
-            await self.full_container_waiter()
-
-    async def full_container_waiter(self):
-        '''Total wait time:
-            sleep_time = 0.1 -> 4.5 seconds
-            sleep_time = 0.05 -> 2.25 seconds
-        '''
-        count = 0
-
-        while len(self.containerRX) < self.pool_size:
-            if count > 10:
-                raise TimeoutError('ContainerRX not full after 10 attempts')
-            
-            count += 1
-            await asyncio.sleep(self.sleep_time * count)
-
-        await self.swap_containers()
-
-    def epochs_plan(self):
-        self.server_plan = {}
-        
-        for i in range(self.epochs):
-            # iinfo(min=0, max=65535, dtype=uint16)
-            self.server_plan[i] = self.rng.permutation(self.pool_size).astype(np.uint16)
-
-    async def serve_epoch(self, epoch: int):
-        for i, j in zip(self.server_plan[epoch][0::2], self.server_plan[epoch][1::2]):
-            tape = self.containerTX[i] + self.containerTX[j]
-            yield tape
-            await asyncio.sleep(0)
-
-    async def serve(self) -> bytes:
-        # First Request
-        try:
-            if self.epoch is None:
-                self.epoch = 0
-                self.init_containers()
-                self.svr = self.serve_epoch(self.epoch)
-
-            return await self.svr.__anext__()
-        except StopAsyncIteration:
-            self.epoch += 1
-
-            if self.epoch >= self.epochs:
-                await self.swap_containers()
-                self.ready = False
-                self.update_pool()
-                return 'STOP'
-            else:
-                await self.swap_containers()
-                self.svr = self.serve_epoch(self.epoch)
-                return await self.serve()
-
-    async def receive(self, tape: bytes):
-        # t = decoder64(tape)
-        # print('Received tape:', len(tape), tape[:10])
-
-        self.containerRX.append(tape[:self.tape_length])
-        self.containerRX.append(tape[self.tape_length:])
-
+  
   
 class ValidationError(Exception):
     '''Raised when the verification of a local and 
