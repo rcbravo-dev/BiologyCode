@@ -46,6 +46,7 @@ logging.config.dictConfig(cfg.logging_config)
 
 # Include in each module:
 LOG = logging.getLogger('CLIENT')
+# LOG.setLevel('DEBUG')
 
 
 class Client:
@@ -64,12 +65,15 @@ class Client:
         if not os.path.exists(self.client_path):
             os.makedirs(self.client_path)
         
-    async def worker(self) -> str:
+    async def worker(self, reset: bool = False) -> str:
         '''Get a tape to work on.'''
         try:
             async with aiohttp.ClientSession() as session:
                 
-                response = await session.get(f'{self.url}/get', data='NEW WORKER')
+                if reset:
+                    response = await session.get(f'{self.url}/reset', data='RESET SERVER')
+                else:
+                    response = await session.get(f'{self.url}/get', data='NEW WORKER')
                 
                 while response.status == 202:
                     data = await response.read()
@@ -83,35 +87,10 @@ class Client:
 
                 await self.status_handler(response)
         except aiohttp.client_exceptions.ServerDisconnectedError as e:
-            LOG.warning(f'Connection to server lost: {e}')
+            LOG.warning(f'Connection to server lost: {e}, reset={reset}')
             await self._work_waiter()
         except Exception as e:
-            LOG.error(f'worker error={e}', exc_info=True)
-            raise(e)
-        
-    async def reset(self) -> str:
-        '''Reset the server and get a new tape to work on.'''
-        try:
-            async with aiohttp.ClientSession() as session:
-                
-                response = await session.get(f'{self.url}/reset', data='RESET SERVER')
-                
-                while response.status == 202:
-                    data = await response.read()
-
-                    header = data[:4]
-                    tape = data[4:]
-                    
-                    tape = self.gce.run(tape)
-                    response = await session.post(f'{self.url}/post', data=header + tape)
-                    LOG.debug(f"Message - {tape[:10]}, response - {response.status} {self.client_name}")
-
-                await self.status_handler(response)
-        except aiohttp.client_exceptions.ServerDisconnectedError as e:
-            LOG.warning(f'Connection to server lost: {e}')
-            await self._work_waiter()
-        except Exception as e:
-            LOG.error(f'worker error={e}', exc_info=True)
+            LOG.exception(f'worker error={e}, reset={reset}', exc_info=True)
             raise(e)
 
     async def status_handler(self, response: aiohttp.ClientResponse) -> None:
@@ -124,12 +103,15 @@ class Client:
         elif response.status == 400:
             LOG.error(f'ValueError. Status: {response.status} {msg}')
         elif response.status == 408:
-            LOG.info(f'''{self.client_name.upper()} has finished work. 
-            Status: {response.status} {msg}
-            Runs: {len(self.gce.times)}, Instruction Counts: {np.sum(self.gce.instruction_counts)}
-            Total Time: {round(np.sum(self.gce.times), 4)}, Average Time: {round(np.mean(self.gce.times), 4)}
-            Loop Errors: {self.gce.loop_errors}, Max Read Errors: {self.gce.exaustion_errors}
-            ''')
+            if len(self.gce.times) > 0:
+                LOG.info(f'''{self.client_name.upper()} has finished work. 
+                Status: {response.status} {msg}
+                Runs: {len(self.gce.times)}, Instruction Counts: {np.sum(self.gce.instruction_counts)}
+                Total Time: {round(np.sum(self.gce.times), 4)}, Average Time: {round(np.mean(self.gce.times, ), 4)}
+                Loop Errors: {self.gce.loop_errors}, Max Read Errors: {self.gce.exaustion_errors}
+                ''')
+            else:
+                LOG.info(f'Server has stopped Status: {response.status} {msg}. To restart request: python3 -m --reset... ')
         else:
             LOG.error(f'Worker Error Status: {response.status} {msg}')
 
@@ -156,16 +138,21 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--port', type=int, default=cfg.api_port, help='Port of server.') 
     parser.add_argument('-c', '--client_name', type=str, default='alice', help='Name of the worker client.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Increase output verbosity.')
-    parser.add_argument('--log-level', type=valid_log_level, default=cfg.log_level, 
+    parser.add_argument('--log-level', type=valid_log_level, default='DEBUG', 
                         help=f'Set the logging level. Choose from DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is {cfg.log_level}.')
     args = parser.parse_args()
 
     # Logging
     logging.config.dictConfig(cfg.logging_config)
     if args.verbose:
+        # Logs to the CLI as well as the log file
         LOG = logging.getLogger('VERBOSE_CLIENT')
+    else:
+        # Only logs to the log file
+        LOG = logging.getLogger('CLIENT')
+
     LOG.setLevel(args.log_level)
-    LOG.debug("Client logging is configured.")
+    LOG.debug(f"Client logging is configured: {LOG}.")
     
     # Initialize the Client
     client = Client(
@@ -177,5 +164,5 @@ if __name__ == "__main__":
     if args.work:
         asyncio.run(client.worker())
     elif args.reset:
-        asyncio.run(client.reset())
+        asyncio.run(client.worker(reset=True))
         

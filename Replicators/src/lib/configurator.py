@@ -74,6 +74,7 @@ class Configurator:
         else:
             raise ValueError(f"Invalid parameter: {name}")
 
+
 def configuration_test(config: Configurator, verbose: bool = False):
     try:
         # Test that lock works
@@ -165,6 +166,8 @@ PARAMS = {
     'mutation_rate_range': (0.0, 1.0),
 
     # Logging
+    # Not setting the log level in the handlers and loggers allows each module to set
+    # its own log level. 
     # 'https://stackoverflow.com/questions/7507825/where-is-a-complete-example-of-logging-config-dictconfig#7507842'
     'logging_config': { 
         'version': 1,
@@ -183,14 +186,14 @@ PARAMS = {
         },
         'handlers': { 
             'console': { 
-                'level': LOG_LEVEL,
+                # 'level': LOG_LEVEL,
                 'formatter': 'console_format',
                 'class': 'logging.StreamHandler',
                 # Default is stderr
                 'stream': 'ext://sys.stdout',  
             },
             'clientFile': {
-                'level': LOG_LEVEL,
+                # 'level': LOG_LEVEL,
                 'formatter': 'standard',
                 'class': 'logging.handlers.RotatingFileHandler',
                 'filename': f'{INSTALL_PATH}/logs/operator_log.log',
@@ -199,7 +202,7 @@ PARAMS = {
                 'backupCount': 3,
             },
             'serverFile': {
-                'level': LOG_LEVEL,
+                # 'level': LOG_LEVEL,
                 'formatter': 'standard',
                 'class': 'logging.handlers.RotatingFileHandler',
                 'filename': f'{INSTALL_PATH}/logs/server_log.log',
@@ -218,17 +221,17 @@ PARAMS = {
             },
             'CLIENT': { 
                 'handlers': ['clientFile'],
-                'level': LOG_LEVEL,
+                # 'level': LOG_LEVEL,
                 'propagate': False
             },
             'VERBOSE_CLIENT': { 
                 'handlers': ['console', 'clientFile'],
-                'level': LOG_LEVEL,
+                # 'level': LOG_LEVEL,
                 'propagate': False
             },
             'SERVER': { 
                 'handlers': ['serverFile'],
-                'level': LOG_LEVEL,
+                # 'level': LOG_LEVEL,
                 'propagate': False
             },
             'NET': { 

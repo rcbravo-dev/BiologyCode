@@ -61,6 +61,7 @@ class GeneticServer:
                  mutation_rate: float = 0.05,
                  experiment_name: str = 'run_001', 
                  track_generations: bool = True,
+                 first_run: bool = True,
                  verbose: bool = True,
                  ) -> None:
         self.host = host
@@ -74,34 +75,52 @@ class GeneticServer:
         self.track_generations = track_generations
         self.verbose = verbose
         self.generator = None
-        self.first_run = True
+        self.first_run = first_run
         self.time_out = cfg.handler_timeout
         self.__post_init__()
 
     def __post_init__(self):
         '''Post initialization method.'''
         self.rng = cfg.rng
-        self.gp = GeneticPool(self.pool_size, self.tape_length, filename=self.path)
+        self.gp = GeneticPool(self.pool_size, self.tape_length, server_path=self.path)
         self.tx_queue = asyncio.Queue()
         self.SENTINEL = object()
         self.server_ready_event = asyncio.Event()
         self.lock = asyncio.Lock()
         self.genes = {}
-
-    def initialize_server(self):
+        
+    async def initialize_server(self):
         '''Initialize the server.'''
-        if self.first_run:
+        load_most_recent = True
+
+        if self.first_run and self.track_generations:
+            pass
+        elif self.first_run and not self.track_generations:
+            # After clearing the server path, will load the most recent pool,
+            # which will raise a FileNotFoundError (Because any files are 
+            # removed with clear_server_path is called), then create and save a new pool.
+            self.gp.clear_server_path()
+        elif not self.first_run:
+            self.epochs_remaining = self.epochs
+
+            if hasattr(self.gp, 'pool'):
+                load_most_recent = False
+        
+        try:
+            if load_most_recent:
+                # Get the most recent
+                self.gp.load_most_recent()
+        except FileNotFoundError:
+            # If not found create and save
             self.gp.create()
-            self.gp.save(overwrite=True)
+            await self._save_pool()
+        finally:
             self.first_run = False
-        else:
-            self.gp.load_most_recent()
+            await self._producer_task()
 
     async def run_server(self):
-        self.initialize_server()
-
-        await self._producer_task()
-
+        await self.initialize_server()
+        
         # Set up the web server
         app = web.Application()
         app.router.add_get('/get', self.handle_client)
@@ -145,17 +164,20 @@ class GeneticServer:
                 LOG.debug(f'All epochs have been served.')
                 return web.Response(status=408, text='STOP')
         except Exception as e:
-            LOG.error(f"Error in handle_client: {e}", exc_info=True)
+            LOG.exception(f"Error in handle_client: {e}", exc_info=True)
             return web.Response(status=500, text='Server error')
         else:
-            return web.Response(status=202, body=byte_array, ) 
+            return web.Response(status=202, body=byte_array) 
         
     async def handle_reset(self, request):
-        self.epochs_remaining = self.epochs
-        await self._producer_task()
-        await asyncio.sleep(0)
-        return await self.handle_client(request)
-
+        try:
+            await self.initialize_server()
+            await asyncio.sleep(0)
+        except Exception as e:
+            LOG.exception(f"Error in handle_reset: {e}", exc_info=True)
+        else:
+            return await self.handle_client(request)
+        
     async def handle_returned_data(self, request):
         """Handler for client requests to return processed byte arrays."""
         try:
@@ -169,7 +191,7 @@ class GeneticServer:
 
             LOG.debug(f'Checked in tapes {i} and {j}')
         except Exception as e:
-            LOG.error(f"Error in handle_returned_data: {e}", exc_info=True)
+            LOG.exception(f"Error in handle_returned_data: {e}", exc_info=True)
             return web.Response(status=500, text='Server error')
         else:
             return await self.handle_client(request) 
@@ -209,7 +231,7 @@ class GeneticServer:
             # Wait for a condition before starting the next epoch
             await asyncio.sleep(0)
 
-            LOG.debug(f'Epochs remaining: {self.epochs_remaining}')
+            LOG.debug(f'Producer task complete. Epochs remaining: {self.epochs_remaining}')
 
     async def _byte_array_generator(self):
         # Async generator that yields 128-byte arrays
@@ -237,6 +259,7 @@ class GeneticServer:
 
     async def _mutate_pool(self):
         actual_mutation_rate = self.gp.mutation(rate=self.mutation_rate)
+        
         LOG.debug(f'Epoch {self.epochs_remaining} mutated pool with rate: {actual_mutation_rate}')
 
     async def _find_dominate_gene_from_pool(self) -> tuple[str, float]:
@@ -283,7 +306,7 @@ if __name__ == '__main__':
     # Logging
     logging.config.dictConfig(cfg.logging_config)
     LOG.setLevel(args.log_level)
-    LOG.debug("Server logging is configured.")
+    LOG.debug(f"Server logging is configured: {LOG}.")
 
     try:
         s = GeneticServer(
@@ -303,9 +326,11 @@ if __name__ == '__main__':
             # Save the pool before stopping if there are epochs remaining
             # signifying that there was a stoppage and the server did not
             # have a chance to save the pool.
-            s._save_pool()
+            asyncio.run(s._save_pool())
 
         LOG.info('Server stopped by user.')
         print('Server stopped by user.', end='\n\n')
+    except Exception as e:
+        LOG.exception(f"Error in main: {e}", exc_info=True)
 
         

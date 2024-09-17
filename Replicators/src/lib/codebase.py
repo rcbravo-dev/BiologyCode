@@ -389,14 +389,12 @@ class GeneticExchangeClient:
 
 
 class GeneticPoolABC:
-    def __init__(self, pool_size: int = 100, tape_length: int = 64, filename: str = ''):
+    def __init__(self, pool_size: int = 100, tape_length: int = 64, server_path: str = ''):
         self.pool_size = pool_size
         self.tape_length = tape_length
         self.size = pool_size * tape_length
-        if filename:
-            self.filename = f'{filename}genetic_pool'
-        else:
-            self.filename = 'genetic_pool'
+        self.filename = 'genetic_pool'
+        self.server_path = server_path
         self.rng = np.random.default_rng()
 
     def __setattr__(self, name, value):
@@ -471,7 +469,7 @@ class GeneticPoolABC:
         suffix = new_path.suffix
         counter = 1
         while new_path.exists():
-            new_path = Path(f"{self.filename}_{counter}{suffix}")
+            new_path = Path(f"{self.server_path}{self.filename}_{counter}{suffix}")
             counter += 1
         return new_path
     
@@ -480,7 +478,7 @@ class GeneticPoolABC:
         self.pool = bytearray(pool)
     
     def save(self, overwrite: bool = False, safe: bool = True):
-        new_path = Path(f'{self.filename}_0.npz')
+        new_path = Path(f'{self.server_path}{self.filename}_0.npz')
         
         # Make the directory if it does not exist
         if new_path.parent.exists() is False:
@@ -520,8 +518,8 @@ class GeneticPoolABC:
 
 
 class GeneticPool(GeneticPoolABC):
-    def __init__(self, pool_size: int = 100, tape_length: int = 64, filename: str = ''):
-        super().__init__(pool_size, tape_length, filename)
+    def __init__(self, pool_size: int = 100, tape_length: int = 64, server_path: str = ''):
+        super().__init__(pool_size, tape_length, server_path)
 
     def mutation(self, rate: float = 0.05) -> float:
         '''Mutates the genetic pool by a given rate. Rate is 
@@ -565,22 +563,32 @@ class GeneticPool(GeneticPoolABC):
         return replicator_gene_from_pdf(pdf)
 
     def load_most_recent(self):
-        path = Path(f'{self.filename}_1.npz')
+        path = Path(f'{self.server_path}{self.filename}_1.npz')
         suffix = path.suffix
 
         counter = 1
         while True:
             if path.exists():
                 counter += 1
-                path = Path(f"{self.filename}_{counter}{suffix}")
+                path = Path(f"{self.server_path}{self.filename}_{counter}{suffix}")
             else:
-                path = Path(f"{self.filename}_{counter-1}{suffix}")
+                path = Path(f"{self.server_path}{self.filename}_{counter-1}{suffix}")
                 break
 
         if path.exists():
             self.load(path)
         else:
             raise FileNotFoundError(f'No files found: {path}')
+        
+    def clear_server_path(self):
+        '''Deletes all files in the server path'''
+        path = Path(self.server_path)
+        files = [p for p in path.glob(f'{self.filename}_*.npz')]
+        if files:
+            x = input(f'Are you sure you want to delete [{len(files)}] files in {path}? (y/n): ').lower()
+            if x == 'y':
+                for f in files:
+                    f.unlink()
         
     def plot_pdf(self):
         '''Plots the probability distribution of the gene pool'''
