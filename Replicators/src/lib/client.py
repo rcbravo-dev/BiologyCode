@@ -46,7 +46,6 @@ logging.config.dictConfig(cfg.logging_config)
 
 # Include in each module:
 LOG = logging.getLogger('CLIENT')
-# LOG.setLevel('DEBUG')
 
 
 class Client:
@@ -65,7 +64,7 @@ class Client:
         if not os.path.exists(self.client_path):
             os.makedirs(self.client_path)
         
-    async def worker(self, reset: bool = False) -> str:
+    async def worker(self, reset: bool = False, rule: str = 'rule_0') -> str:
         '''Get a tape to work on.'''
         try:
             async with aiohttp.ClientSession() as session:
@@ -81,7 +80,7 @@ class Client:
                     header = data[:4]
                     tape = data[4:]
                     
-                    tape = self.gce.run(tape)
+                    tape = self.gce.run(tape, rule=rule)
                     response = await session.post(f'{self.url}/post', data=header + tape)
                     LOG.debug(f"Message - {tape[:10]}, response - {response.status} {self.client_name}")
 
@@ -127,7 +126,7 @@ class Client:
 
 
 # Example usage
-# python3 -m client --work -hs 'localhost' -p 8080 -c alice -v --log-level info
+# python3 -m client --work -hs 'localhost' -p 8080 -c alice -v --log-level info -r rule_2
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Send a message in bytes format to a server.')
@@ -137,6 +136,7 @@ if __name__ == "__main__":
     parser.add_argument('-hs', '--host', type=str, default=cfg.api_host, help='ip address or "localhost" of server.')  
     parser.add_argument('-p', '--port', type=int, default=cfg.api_port, help='Port of server.') 
     parser.add_argument('-c', '--client_name', type=str, default='alice', help='Name of the worker client.')
+    parser.add_argument('-r', '--rule', type=str, default='rule_0', help='Rule to run the tape on.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Increase output verbosity.')
     parser.add_argument('--log-level', type=valid_log_level, default='DEBUG', 
                         help=f'Set the logging level. Choose from DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is {cfg.log_level}.')
@@ -162,7 +162,7 @@ if __name__ == "__main__":
     )
 
     if args.work:
-        asyncio.run(client.worker())
+        asyncio.run(client.worker(rule=args.rule))
     elif args.reset:
-        asyncio.run(client.worker(reset=True))
+        asyncio.run(client.worker(reset=True, rule=args.rule))
         

@@ -33,7 +33,7 @@ try:
     script_dir = os.path.dirname(os.path.realpath(__file__))
 except NameError as error:
     import os
-    print(error)
+    # print(error)
     cwd = os.getcwd()
     script_dir = cwd + '/main' 
 
@@ -258,9 +258,12 @@ class GeneticServer:
         await asyncio.sleep(0)
 
     async def _mutate_pool(self):
-        actual_mutation_rate = self.gp.mutation(rate=self.mutation_rate)
+        if self.mutation_rate:
+            actual_mutation_rate = self.gp.mutation(rate=self.mutation_rate)
         
-        LOG.debug(f'Epoch {self.epochs_remaining} mutated pool with rate: {actual_mutation_rate}')
+            LOG.debug(f'Epoch {self.epochs_remaining} mutated pool with rate: {actual_mutation_rate}')
+        else:
+            LOG.debug(f'Epoch {self.epochs_remaining} pool not mutated.')
 
     async def _find_dominate_gene_from_pool(self) -> tuple[str, float]:
         gene = self.gp.find_dominate_gene()
@@ -286,9 +289,10 @@ class GeneticServer:
         # Log compression ratio
         LOG.info(f'Pool saved after {self.epochs - self.epochs_remaining} epochs with a compression ratio of: {round(self.gp.compression_ratio, 4)}.')
 
-if __name__ == '__main__':
-    # python3 -m server -hs 'localhost' -p 8080 -e 100 -ps 512 -t 64 -m 0.05 -en 'run_001' -v --track_gen
 
+# python3 -m server -hs 'localhost' -p 8080 -e 100 -ps 512 -t 64 -m 0.03 -en 'run_001' -v --track_gen
+
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Server the GeneticCode.')
     parser.add_argument('-hs', '--host', default=cfg.api_host, type=str, help='ip address or "localhost" of server.')  
     parser.add_argument('-p', '--port', default=cfg.api_port, type=int, help='Port of server.') 

@@ -90,8 +90,8 @@ def determine_gene_fitness(gene: np.ndarray[np.uint8]) -> tuple[str, float]:
 
 def hamming_similarity(a: np.ndarray[np.uint8], b: np.ndarray[np.uint8]) -> int:
     '''Returns the hamming distance between two arrays'''
-    x = a ^ b
-    return 1 - np.sum(np.unpackbits(x)) / (len(a) * 8)
+    x = np.unpackbits(a ^ b)
+    return 1.0 - (np.sum(x) / len(x))
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     '''Returns the cosine distance between two arrays'''
@@ -205,6 +205,11 @@ class GeneticExchangeClient:
         self.instruction_set = {k for k in instruction_mapping.values()}
         self.first_run = True
         self.max_reads = 6000
+        self.execute_instruction = {
+            'rule_0': self.rule_0,
+            'rule_1': self.rule_1,
+            'rule_2': self.rule_2,
+        }
     
     def __setattr__(self, name, value):
         if name == 'tape_length':
@@ -215,7 +220,7 @@ class GeneticExchangeClient:
         
         super().__setattr__(name, value)
 
-    def execute_instruction(self, inst: str, i: int, h0: int, h1:int, tape: np.ndarray) -> tuple:
+    def rule_0(self, inst: str, i: int, h0: int, h1:int, tape: np.ndarray) -> tuple:
         '''Executes the instruction and returns the updated state'''
         if inst in {'.', '<', '>', '{', '}', '+', '-', '^', '_', 'r', 'w'}:
             if inst == '.':
@@ -283,8 +288,155 @@ class GeneticExchangeClient:
                 i = chk
 
         return i, h0, h1, tape
+    
+    def rule_1(self, inst: str, i: int, h0: int, h1:int, tape: np.ndarray) -> tuple:
+        '''Executes the instruction and returns the updated state'''
+        if inst in {'.', '<', '>', '{', '}', '+', '-', '^', '_', 'r', 'w'}:
+            if inst == '.':
+                pass
 
-    def run(self, tape: bytes) -> bytes:
+            # Moving header 0
+            elif inst == '>':
+                h0 = head_position(self.head_table, h0, add=True)
+            elif inst == '<':
+                h0 = head_position(self.head_table, h0, sub=True)
+            
+            # Moving header 1
+            elif inst == '}':
+                h1 = head_position(self.head_table, h1, add=True)
+            elif inst == '{':
+                h1 = head_position(self.head_table, h1, sub=True)
+
+            # Transforming values
+            elif inst == '+':
+                tape[h0] = head_position(self.mod_table, tape[h0], add=True)
+            elif inst == '-':
+                tape[h0] = head_position(self.mod_table, tape[h0], sub=True)
+            elif inst == '^':
+                tape[h1] = head_position(self.mod_table, tape[h1], add=True)
+            elif inst == '_':
+                tape[h1] = head_position(self.mod_table, tape[h1], sub=True)
+
+            # Read from
+            elif inst == 'r':
+                if i < self.tape_midpoint:
+                    tape[h0] = tape[h1]
+                else:
+                    tape[h1] = tape[h0]
+            
+            # Write to
+            elif inst == 'w':
+                if i < self.tape_midpoint:
+                    tape[h1] = tape[h0] 
+                else:
+                    tape[h0] = tape[h1]
+
+            # Move instruction pointer to the next instruction. Loops are handled separately
+            i += 1
+        
+        # Loops
+        elif inst == '[':
+            # matching_bracket = np.where(tape[i:] == 111)
+            if tape[i + 1] == 0:
+                # Loop is over, move to the matching bracket or raises if not found
+                i = i + np.where(tape[i:] == 128)[0][0]
+            else:
+                # Loop is not over or unbounded, move to the next instruction
+                i += 1
+                # CHANGE FOR INSTRUCTION 1
+                tape[i] = head_position(self.mod_table, tape[i], sub=True)
+
+        elif inst == ']':
+            # This should raise if no matching bracket is found
+            chk = np.where(tape[:i] == 127)[0][-1]
+            
+            if tape[chk + 1] == 0:
+                # If the loop is at 0, then the inst pointer does not move to the beginning of the loop,
+                # but rather to the next instruction
+                i += 1
+            else:
+                # Else move the pointer to the matching bracket, to start loop over
+                i = chk
+
+        return i, h0, h1, tape
+    
+    def rule_2(self, inst: str, i: int, h0: int, h1:int, tape: np.ndarray) -> tuple:
+        '''Executes the instruction and returns the updated state'''
+        if inst in {'.', '<', '>', '{', '}', '+', '-', '^', '_', 'r', 'w'}:
+            if inst == '.':
+                pass
+
+            # Moving header 0
+            elif inst == '>':
+                h0 = head_position(self.head_table, h0, add=True)
+            elif inst == '<':
+                h0 = head_position(self.head_table, h0, sub=True)
+            
+            # Moving header 1
+            elif inst == '}':
+                h1 = head_position(self.head_table, h1, add=True)
+            elif inst == '{':
+                h1 = head_position(self.head_table, h1, sub=True)
+
+            # Transforming values
+            elif inst == '+':
+                tape[h0] = head_position(self.mod_table, tape[h0], add=True)
+            elif inst == '-':
+                tape[h0] = head_position(self.mod_table, tape[h0], sub=True)
+            elif inst == '^':
+                tape[h1] = head_position(self.mod_table, tape[h1], add=True)
+            elif inst == '_':
+                tape[h1] = head_position(self.mod_table, tape[h1], sub=True)
+
+            # Read from
+            # CHANGE FROM RULE 0
+            elif inst == 'r':
+                if i < self.tape_midpoint:
+                    if tape[h0] % 2 == 0:
+                        tape[h0] = tape[h1]
+                    else:
+                        tape[h0] = tape[h0] ^ tape[h1]
+                else:
+                    if tape[h1] % 2 == 0:
+                        tape[h1] = tape[h0]
+                    else:
+                        tape[h1] = tape[h0] ^ tape[h1]
+            
+            # Write to
+            elif inst == 'w':
+                if i < self.tape_midpoint:
+                    tape[h1] = tape[h0] 
+                else:
+                    tape[h0] = tape[h1]
+
+            # Move instruction pointer to the next instruction. Loops are handled separately
+            i += 1
+        
+        # Loops
+        elif inst == '[':
+            # matching_bracket = np.where(tape[i:] == 111)
+            if tape[i + 1] == 0:
+                # Loop is over, move to the matching bracket or raises if not found
+                i = i + np.where(tape[i:] == 128)[0][0]
+            else:
+                # Loop is not over or unbounded, move to the next instruction
+                i += 1
+
+        elif inst == ']':
+            # This should raise if no matching bracket is found
+            chk = np.where(tape[:i] == 127)[0][-1]
+            
+            if tape[chk + 1] == 0:
+                # If the loop is at 0, then the inst pointer does not move to the beginning of the loop,
+                # but rather to the next instruction
+                i += 1
+            else:
+                # Else move the pointer to the matching bracket, to start loop over
+                i = chk
+
+        return i, h0, h1, tape
+    
+    def run(self, tape: bytes, rule: str = 'rule_0') -> bytes:
         tape = np.frombuffer(tape, dtype=np.uint8).copy()
 
         if self.first_run:
@@ -304,7 +456,7 @@ class GeneticExchangeClient:
             while True:
                 inst = instruction_mapping.get(tape[i], '.')
 
-                i, h0, h1, tape = self.execute_instruction(inst, i, h0, h1, tape)
+                i, h0, h1, tape = self.execute_instruction[rule](inst, i, h0, h1, tape)
                 
                 if inst in self.instruction_set:
                     cnt += 1
@@ -329,7 +481,7 @@ class GeneticExchangeClient:
 
             return tape.tobytes()
         
-    def visualize(self, tape: bytes, sleep_time: float = 0.2) -> bytes:
+    def visualize(self, tape: bytes, sleep_time: float = 0.2, rule: str = 'rule_0') -> bytes:
         tape = np.frombuffer(tape, dtype=np.uint8).copy()
 
         if self.first_run:
@@ -353,7 +505,7 @@ class GeneticExchangeClient:
             while True:
                 inst = instruction_mapping.get(tape[i], '.')
 
-                i, h0, h1, tape = self.execute_instruction(inst, i, h0, h1, tape)
+                i, h0, h1, tape = self.execute_instruction[rule](inst, i, h0, h1, tape)
                 
                 if inst in self.instruction_set:
                     cnt += 1
@@ -476,6 +628,10 @@ class GeneticPoolABC:
         pool = np.array([secrets.randbits(8) for _ in range(self.size)], dtype=np.uint8).tobytes()
         self.pool = bytearray(pool)
     
+    def _estimate_kolmogorov_complexity(self, path: Path) -> float:
+        '''kolmogorov complexity. 1 - High, 0 - Low'''
+        return 1.0 - (path.stat().st_size / self.size)
+    
     def save(self, overwrite: bool = False, safe: bool = True):
         new_path = Path(f'{self.server_path}{self.filename}_0.npz')
         
@@ -498,7 +654,7 @@ class GeneticPoolABC:
 
         np.savez_compressed(new_path, self.pool)
 
-        self.compression_ratio = new_path.stat().st_size / self.size
+        self.compression_ratio = self._estimate_kolmogorov_complexity(new_path)
 
     def load(self, file_path: str) -> None:
         '''Loads the filename if provided intothe genetic pool'''
@@ -556,10 +712,6 @@ class GeneticPool(GeneticPoolABC):
         pool = np.frombuffer(self.pool, dtype=np.uint8)
 
         return create_gene_pool_pdf(pool, self.pool_size, self.tape_length)
-
-    def replicator_gene_from_pdf(self, pdf: np.ndarray[np.uint16]) -> np.ndarray[np.uint8]:
-        '''Returns a gene that can replicate the tape'''
-        return replicator_gene_from_pdf(pdf)
 
     def load_most_recent(self):
         path = Path(f'{self.server_path}{self.filename}_1.npz')
